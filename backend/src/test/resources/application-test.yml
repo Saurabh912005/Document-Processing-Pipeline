@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:document_processing;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  servlet:
+    multipart:
+      max-file-size: 10MB
+
+document:
+  storage:
+    path: ${java.io.tmpdir}/dpp-test-storage
+
+processing:
+  max-attempts: 3
+  backoff-seconds:
+    - 0
+    - 0
+    - 0
+
+document.recovery.fixed-delay-ms: 3600000
