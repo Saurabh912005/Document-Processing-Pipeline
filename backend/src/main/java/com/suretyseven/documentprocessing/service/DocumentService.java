@@ -41,7 +41,7 @@ public class DocumentService {
     private final FileStorageService fileStorageService;
     private final DocumentIdService documentIdService;
     private final DocumentHistoryService historyService;
-    private final DocumentProcessingOrchestrator processingOrchestrator;
+    private final DocumentProcessingTrigger processingTrigger;
     private final ObjectMapper objectMapper;
 
     public DocumentService(
@@ -52,7 +52,7 @@ public class DocumentService {
             FileStorageService fileStorageService,
             DocumentIdService documentIdService,
             DocumentHistoryService historyService,
-            DocumentProcessingOrchestrator processingOrchestrator,
+            DocumentProcessingTrigger processingTrigger,
             ObjectMapper objectMapper) {
         this.documentRepository = documentRepository;
         this.extractedResultRepository = extractedResultRepository;
@@ -61,7 +61,7 @@ public class DocumentService {
         this.fileStorageService = fileStorageService;
         this.documentIdService = documentIdService;
         this.historyService = historyService;
-        this.processingOrchestrator = processingOrchestrator;
+        this.processingTrigger = processingTrigger;
         this.objectMapper = objectMapper;
     }
 
@@ -97,7 +97,7 @@ public class DocumentService {
         }
 
         historyService.record(documentId, DocumentStatus.UPLOADED, null, 0);
-        processingOrchestrator.processDocumentAsync(documentId);
+        processingTrigger.enqueueAfterCommit(documentId);
         return new UploadResult(documentId, DocumentStatus.UPLOADED, false);
     }
 

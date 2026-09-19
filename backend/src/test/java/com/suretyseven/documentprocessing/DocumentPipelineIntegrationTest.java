@@ -33,8 +33,9 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -76,6 +77,21 @@ class DocumentPipelineIntegrationTest {
                         "New Delhi",
                         BigDecimal.valueOf(12_500_000),
                         LocalDate.parse("2026-08-15")));
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void uploadEnqueuesProcessingAfterCommit() throws Exception {
+        when(mockDocumentProcessor.rollOutcomeRandom()).thenReturn(ProcessorOutcome.SUCCESS);
+
+        String documentId = uploadAndGetId(pdf("async-after-commit.pdf", "async-after-commit-bytes"));
+
+        DocumentStatus terminal = DocumentStatus.UPLOADED;
+        for (int i = 0; i < 50 && terminal == DocumentStatus.UPLOADED; i++) {
+            Thread.sleep(100);
+            terminal = documentRepository.findById(documentId).orElseThrow().getStatus();
+        }
+        assertThat(terminal).isNotEqualTo(DocumentStatus.UPLOADED);
     }
 
     @Test
