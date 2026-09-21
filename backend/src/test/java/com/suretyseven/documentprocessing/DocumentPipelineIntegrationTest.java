@@ -2,7 +2,6 @@ package com.suretyseven.documentprocessing;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -12,16 +11,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.suretyseven.documentprocessing.domain.DocumentStatus;
-import com.suretyseven.documentprocessing.domain.ProcessorOutcome;
-import com.suretyseven.documentprocessing.processor.MockDocumentProcessor;
+import com.suretyseven.documentprocessing.processor.DocumentFieldExtractor;
 import com.suretyseven.documentprocessing.processor.MockExtractionPayload;
+import com.suretyseven.documentprocessing.processor.ReferenceExtractionTemplate;
 import com.suretyseven.documentprocessing.repository.DocumentHistoryEventRepository;
 import com.suretyseven.documentprocessing.repository.DocumentRepository;
 import com.suretyseven.documentprocessing.repository.ExtractedResultRepository;
 import com.suretyseven.documentprocessing.service.DocumentProcessingOrchestrator;
-import java.math.BigDecimal;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.time.LocalDate;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,6 +41,17 @@ import org.springframework.transaction.annotation.Transactional;
 @Transactional
 class DocumentPipelineIntegrationTest {
 
+    private static final String REFERENCE_JSON =
+            """
+            {
+              "companyName": "ABC Construction Pvt Ltd",
+              "registrationNumber": "U12345DL2020PTC123456",
+              "address": "New Delhi",
+              "annualRevenue": 12500000,
+              "documentDate": "2026-08-15"
+            }
+            """;
+
     @Autowired
     private MockMvc mockMvc;
 
@@ -62,29 +71,21 @@ class DocumentPipelineIntegrationTest {
     private DocumentProcessingOrchestrator orchestrator;
 
     @MockBean
-    private MockDocumentProcessor mockDocumentProcessor;
+    private DocumentFieldExtractor fieldExtractor;
 
     @BeforeEach
     void setUp() throws Exception {
         historyRepository.deleteAll();
         extractedResultRepository.deleteAll();
         documentRepository.deleteAll();
-        doAnswer(invocation -> null).when(mockDocumentProcessor).simulateDelay();
-        when(mockDocumentProcessor.generateSuccessPayload(any()))
-                .thenAnswer(inv -> new MockExtractionPayload(
-                        "ABC Construction Pvt Ltd",
-                        "U12345DL2020PTC123456",
-                        "New Delhi",
-                        BigDecimal.valueOf(12_500_000),
-                        LocalDate.parse("2026-08-15")));
     }
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void uploadEnqueuesProcessingAfterCommit() throws Exception {
-        when(mockDocumentProcessor.rollOutcomeRandom()).thenReturn(ProcessorOutcome.SUCCESS);
+        when(fieldExtractor.extract(any())).thenReturn(ReferenceExtractionTemplate.CANONICAL);
 
-        String documentId = uploadAndGetId(pdf("async-after-commit.pdf", "async-after-commit-bytes"));
+        String documentId = uploadAndGetId(documentFile("async-after-commit.pdf", REFERENCE_JSON));
 
         DocumentStatus terminal = DocumentStatus.UPLOADED;
         for (int i = 0; i < 50 && terminal == DocumentStatus.UPLOADED; i++) {
@@ -96,7 +97,7 @@ class DocumentPipelineIntegrationTest {
 
     @Test
     void uploadValidDocumentReturns201WithUploadedStatus() throws Exception {
-        MockMultipartFile file = pdf("statement.pdf", "unique-content-1");
+        MockMultipartFile file = documentFile("statement.pdf", REFERENCE_JSON);
         mockMvc.perform(multipart("/api/documents")
                         .file(file)
                         .param("documentType", "FINANCIAL_STATEMENT"))
@@ -108,7 +109,7 @@ class DocumentPipelineIntegrationTest {
 
     @Test
     void duplicateUploadReturnsExistingDocumentWith200() throws Exception {
-        MockMultipartFile file = pdf("dup.pdf", "duplicate-bytes");
+        MockMultipartFile file = documentFile("dup.pdf", REFERENCE_JSON);
         MvcResult first = mockMvc.perform(multipart("/api/documents").file(file).param("documentType", "OTHER"))
                 .andExpect(status().isCreated())
                 .andReturn();
@@ -131,11 +132,10 @@ class DocumentPipelineIntegrationTest {
 
     @Test
     void invalidExtractedDataMarksValidationFailure() throws Exception {
-        when(mockDocumentProcessor.rollOutcomeRandom()).thenReturn(ProcessorOutcome.INVALID_RESULT);
-        when(mockDocumentProcessor.generateInvalidPayload(any()))
-                .thenReturn(new MockExtractionPayload("", "REG", "Addr", BigDecimal.TEN, LocalDate.now()));
+        when(fieldExtractor.extract(any()))
+                .thenReturn(new MockExtractionPayload("", "REG", "Addr", null, null));
 
-        String documentId = uploadAndGetId(pdf("invalid.pdf", "invalid-content"));
+        String documentId = uploadAndGetId(documentFile("invalid.pdf", "no fields"));
         orchestrator.processWithRetries(documentId);
 
         mockMvc.perform(get("/api/documents/{id}", documentId))
@@ -147,8 +147,9 @@ class DocumentPipelineIntegrationTest {
 
     @Test
     void successfulProcessingEndToEnd() throws Exception {
-        when(mockDocumentProcessor.rollOutcomeRandom()).thenReturn(ProcessorOutcome.SUCCESS);
-        String documentId = uploadAndGetId(pdf("success.pdf", "success-content"));
+        when(fieldExtractor.extract(any())).thenReturn(ReferenceExtractionTemplate.CANONICAL);
+
+        String documentId = uploadAndGetId(documentFile("success.pdf", REFERENCE_JSON));
         orchestrator.processWithRetries(documentId);
 
         mockMvc.perform(get("/api/documents/{id}", documentId))
@@ -158,9 +159,10 @@ class DocumentPipelineIntegrationTest {
     }
 
     @Test
-    void processorTimeoutMarksFailedWithReasonInHistory() throws Exception {
-        when(mockDocumentProcessor.rollOutcomeRandom()).thenReturn(ProcessorOutcome.TIMEOUT);
-        String documentId = uploadAndGetId(pdf("timeout.pdf", "timeout-content"));
+    void processorReadErrorMarksFailedWithReasonInHistory() throws Exception {
+        when(fieldExtractor.extract(any())).thenThrow(new IOException("simulated read failure"));
+
+        String documentId = uploadAndGetId(documentFile("read-error.pdf", REFERENCE_JSON));
         orchestrator.processWithRetries(documentId);
 
         mockMvc.perform(get("/api/documents/{id}", documentId))
@@ -169,17 +171,20 @@ class DocumentPipelineIntegrationTest {
 
         mockMvc.perform(get("/api/documents/{id}/history", documentId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[?(@.reason == 'PROCESSOR_TIMEOUT_EXHAUSTED')]").exists());
+                .andExpect(jsonPath("$[?(@.reason == 'PROCESSOR_ERROR_EXHAUSTED')]").exists());
     }
 
     @Test
     void failureThenSuccessOnRetryShowsHistoryAndProcessedStatus() throws Exception {
         AtomicInteger calls = new AtomicInteger();
-        when(mockDocumentProcessor.rollOutcomeRandom()).thenAnswer(inv -> {
-            return calls.getAndIncrement() == 0 ? ProcessorOutcome.TIMEOUT : ProcessorOutcome.SUCCESS;
+        when(fieldExtractor.extract(any())).thenAnswer(inv -> {
+            if (calls.getAndIncrement() == 0) {
+                throw new IOException("transient");
+            }
+            return ReferenceExtractionTemplate.CANONICAL;
         });
 
-        String documentId = uploadAndGetId(pdf("retry.pdf", "retry-content"));
+        String documentId = uploadAndGetId(documentFile("retry.pdf", REFERENCE_JSON));
         orchestrator.processWithRetries(documentId);
 
         mockMvc.perform(get("/api/documents/{id}", documentId))
@@ -187,7 +192,7 @@ class DocumentPipelineIntegrationTest {
                 .andExpect(jsonPath("$.status").value("PROCESSED"));
 
         var history = historyRepository.findByDocumentIdOrderByTimestampAsc(documentId);
-        assertThat(history.stream().anyMatch(h -> "PROCESSOR_TIMEOUT".equals(h.getReason()))).isTrue();
+        assertThat(history.stream().anyMatch(h -> "PROCESSOR_ERROR".equals(h.getReason()))).isTrue();
         assertThat(history.stream().anyMatch(h -> h.getStatus() == DocumentStatus.PROCESSED)).isTrue();
     }
 
@@ -197,10 +202,11 @@ class DocumentPipelineIntegrationTest {
                         .param("documentType", "FINANCIAL_STATEMENT"))
                 .andExpect(status().isCreated())
                 .andReturn();
-        return objectMapper.readTree(result.getResponse().getContentAsString()).get("documentId").asText();
+        JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+        return body.get("documentId").asText();
     }
 
-    private MockMultipartFile pdf(String name, String content) {
+    private MockMultipartFile documentFile(String name, String content) {
         return new MockMultipartFile(
                 "file", name, MediaType.APPLICATION_PDF_VALUE, content.getBytes(StandardCharsets.UTF_8));
     }

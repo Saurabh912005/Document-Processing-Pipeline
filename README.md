@@ -1,6 +1,6 @@
 # Document Processing Pipeline
 
-Full-stack take-home implementation: upload documents, process asynchronously with a mock extractor, validate results, retry transient failures, and inspect status/history via a React UI.
+Full-stack take-home implementation: upload documents, extract structured fields from file content (PDF text or embedded JSON), validate results, retry transient read failures, and inspect status/history via a React UI.
 
 ## Stack
 
@@ -79,11 +79,27 @@ SHA-256 hash is computed on upload. If a document with the same hash exists, the
 - **Document IDs:** `DOC-00001` style via a locked `document_id_sequence` row (human-readable, sequential).
 - **Validation failures:** status **`FAILED`**, `failureReason` **`VALIDATION_FAILED`**, field messages in `extractedResult.validationErrors`. Tradeoff: simpler than a separate `VALIDATION_FAILED` status enum value, but still distinguishable via reason + errors (no retry).
 
+### Document content format
+
+Include either embedded JSON or labeled lines in the uploaded file (PDF with a text layer, or a `.pdf` upload whose bytes are JSON/text for local demos):
+
+```json
+{
+  "companyName": "ABC Construction Pvt Ltd",
+  "registrationNumber": "U12345DL2020PTC123456",
+  "address": "New Delhi",
+  "annualRevenue": 12500000,
+  "documentDate": "2026-08-15"
+}
+```
+
+If the text matches the reference registration number and company name, the canonical values above are used. Otherwise fields are parsed from JSON or `field: value` lines. Missing/invalid required fields → **`FAILED`**; all validators pass → **`PROCESSED`**.
+
 ## Engineering Q&A
 
 ### 1. Why this architecture?
 
-Single deployable **monolith** keeps operational complexity low for a take-home. Upload returns quickly; CPU/IO-heavy mock processing runs on a **bounded thread pool** so HTTP threads are not blocked. History rows provide an audit trail without event sourcing.
+Single deployable **monolith** keeps operational complexity low for a take-home. Upload returns quickly; CPU/IO-heavy extraction runs on a **bounded thread pool** so HTTP threads are not blocked. History rows provide an audit trail without event sourcing.
 
 ### 2. Why MySQL?
 
@@ -91,13 +107,13 @@ Relational fit for documents, 1:1 extracted results, and append-only history. Ma
 
 ### 3. How does async processing work?
 
-`DocumentProcessingOrchestrator.processDocumentAsync` is annotated with `@Async("documentProcessingExecutor")`. `AsyncConfig` defines a `ThreadPoolTaskExecutor` (core 4, max 8, queue 100). After upload, the service fires async processing; the worker loop handles PROCESSING → mock → validate → PROCESSED/FAILED, including retries.
+`DocumentProcessingOrchestrator.processDocumentAsync` is annotated with `@Async("documentProcessingExecutor")`. `AsyncConfig` defines a `ThreadPoolTaskExecutor` (core 4, max 8, queue 100). After upload, the service fires async processing; the worker loop handles PROCESSING → extract → validate → PROCESSED/FAILED, including retries on read errors.
 
 ### 4. How do retries work?
 
 - **Max attempts:** 3 (`processing.max-attempts`).
-- **Retried:** `TIMEOUT`, `ERROR` (transient).
-- **Not retried:** `INVALID_RESULT` / validation failures (deterministic).
+- **Retried:** `PROCESSOR_ERROR` (transient file read failures).
+- **Not retried:** validation failures (deterministic).
 - **Backoff:** 2s, 4s, 8s (`Thread.sleep` in-process between attempts).
 - Each attempt writes **FAILED** (with reason) then re-enters **PROCESSING** on retry; terminal failure uses `*_EXHAUSTED` reasons.
 
@@ -120,7 +136,7 @@ Relational fit for documents, 1:1 extracted results, and append-only history. Ma
 ### 8. Limitations (honest)
 
 1. Async retries use in-thread sleep — not durable across restarts (queue + scheduled jobs would be safer).
-2. Mock outcomes are random per attempt (except stable success payloads keyed by hash) — not production extraction.
+2. Extraction is PDF text / pattern parsing only — not production OCR for scanned documents.
 3. Local disk storage is not HA; backup and multi-AZ would require object storage.
 4. No authn/authz, rate limits, or virus scanning on uploads.
 

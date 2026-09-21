@@ -3,10 +3,10 @@ package com.suretyseven.documentprocessing.service;
 import com.suretyseven.documentprocessing.config.ProcessingProperties;
 import com.suretyseven.documentprocessing.domain.Document;
 import com.suretyseven.documentprocessing.domain.DocumentStatus;
-import com.suretyseven.documentprocessing.domain.ProcessorOutcome;
-import com.suretyseven.documentprocessing.processor.MockDocumentProcessor;
+import com.suretyseven.documentprocessing.processor.DocumentFieldExtractor;
 import com.suretyseven.documentprocessing.processor.MockExtractionPayload;
 import com.suretyseven.documentprocessing.repository.DocumentRepository;
+import java.io.IOException;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,17 +20,17 @@ public class DocumentProcessingOrchestrator {
 
     private final DocumentRepository documentRepository;
     private final DocumentProcessingStateService stateService;
-    private final MockDocumentProcessor mockProcessor;
+    private final DocumentFieldExtractor fieldExtractor;
     private final ProcessingProperties processingProperties;
 
     public DocumentProcessingOrchestrator(
             DocumentRepository documentRepository,
             DocumentProcessingStateService stateService,
-            MockDocumentProcessor mockProcessor,
+            DocumentFieldExtractor fieldExtractor,
             ProcessingProperties processingProperties) {
         this.documentRepository = documentRepository;
         this.stateService = stateService;
-        this.mockProcessor = mockProcessor;
+        this.fieldExtractor = fieldExtractor;
         this.processingProperties = processingProperties;
     }
 
@@ -54,59 +54,29 @@ public class DocumentProcessingOrchestrator {
                 return;
             }
 
-            ProcessorOutcome outcome = mockProcessor.rollOutcomeRandom();
+            document = documentRepository.findById(documentId).orElse(null);
+            if (document == null) {
+                return;
+            }
+
+            MockExtractionPayload payload;
             try {
-                mockProcessor.simulateDelay();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                if (handleTransientFailure(documentId, attempt, "PROCESSOR_INTERRUPTED", maxAttempts, backoff)) {
-                    return;
-                }
-                document = documentRepository.findById(documentId).orElse(null);
-                if (document == null || document.getStatus() == DocumentStatus.FAILED) {
+                payload = fieldExtractor.extract(document);
+            } catch (IOException e) {
+                log.warn("document_extraction documentId={} attempt={} error={}", documentId, attempt, e.getMessage());
+                if (handleTransientFailure(documentId, attempt, "PROCESSOR_ERROR", maxAttempts, backoff)) {
                     return;
                 }
                 continue;
             }
 
-            log.info(
-                    "document_processing documentId={} attempt={} outcome={}",
-                    documentId,
-                    attempt,
-                    outcome);
+            log.info("document_processing documentId={} attempt={} outcome=EXTRACTED", documentId, attempt);
 
-            switch (outcome) {
-                case SUCCESS -> {
-                    MockExtractionPayload payload = mockProcessor.generateSuccessPayload(document.getFileHash());
-                    if (stateService.applyValidation(documentId, payload, attempt)) {
-                        return;
-                    }
-                    stateService.markProcessed(documentId, payload, attempt);
-                    return;
-                }
-                case INVALID_RESULT -> {
-                    MockExtractionPayload payload = mockProcessor.generateInvalidPayload(document.getFileHash());
-                    stateService.applyValidation(documentId, payload, attempt);
-                    return;
-                }
-                case TIMEOUT -> {
-                    if (handleTransientFailure(documentId, attempt, "PROCESSOR_TIMEOUT", maxAttempts, backoff)) {
-                        return;
-                    }
-                }
-                case ERROR -> {
-                    if (handleTransientFailure(documentId, attempt, "PROCESSOR_ERROR", maxAttempts, backoff)) {
-                        return;
-                    }
-                }
-                default -> {
-                    // no-op
-                }
-            }
-            document = documentRepository.findById(documentId).orElse(null);
-            if (document == null) {
+            if (stateService.applyValidation(documentId, payload, attempt)) {
                 return;
             }
+            stateService.markProcessed(documentId, payload, attempt);
+            return;
         }
     }
 

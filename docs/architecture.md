@@ -6,8 +6,8 @@ flowchart LR
   API -->|JPA| DB[(MySQL)]
   API -->|save bytes| FS[Local file volume]
   API -->|@Async| POOL[Thread pool executor]
-  POOL --> MOCK[MockDocumentProcessor]
-  MOCK --> VAL[ExtractedDataValidator]
+  POOL --> EXT[DocumentFieldExtractor]
+  EXT --> VAL[ExtractedDataValidator]
   VAL -->|status + result| DB
   POOL --> HIST[DocumentHistoryEvent rows]
   HIST --> DB
@@ -17,5 +17,5 @@ flowchart LR
 ## Request flow
 
 1. **Upload** — `POST /api/documents` stores the file on disk, computes SHA-256, deduplicates on `file_hash`, persists `Document` as `UPLOADED`, appends history, and enqueues async processing.
-2. **Processing** — `@Async` worker transitions to `PROCESSING`, invokes the mock processor (1–5s delay, weighted outcome), validates extracted fields, retries transient failures with backoff, and writes `ExtractedResult` + history events.
+2. **Processing** — `@Async` worker transitions to `PROCESSING`, extracts fields from the stored file, validates extracted fields, retries I/O failures with backoff, and writes `ExtractedResult` + history events.
 3. **Read APIs** — list/detail/history endpoints serve UI polling and dashboards.
