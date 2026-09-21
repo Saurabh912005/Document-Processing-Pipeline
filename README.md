@@ -23,6 +23,22 @@ docker compose up --build
 - API: http://localhost:8080/api/documents
 - MySQL: localhost:3306 (credentials in `.env.example`)
 
+### Sample PDF
+
+A reference financial statement is included for onboarding and manual testing:
+
+**[docs/samples/financial_statement_ABC_Construction_Pvt_Ltd.pdf](docs/samples/financial_statement_ABC_Construction_Pvt_Ltd.pdf)**
+
+Upload it from the UI (**Upload** page) with document type **Financial statement**. After processing, extracted fields should match the reference values below (company **ABC Construction Pvt Ltd**, registration **U12345DL2020PTC123456**, etc.) and status should become **`PROCESSED`** when validation passes.
+
+From the repo root you can also upload via API:
+
+```bash
+curl -X POST http://localhost:8080/api/documents \
+  -F "file=@docs/samples/financial_statement_ABC_Construction_Pvt_Ltd.pdf" \
+  -F "documentType=FINANCIAL_STATEMENT"
+```
+
 ## Local development
 
 ### Backend
@@ -145,7 +161,7 @@ Relational fit for documents, 1:1 extracted results, and append-only history. Ma
 ```
 backend/          Spring Boot API + processing
 frontend/         React UI
-docs/             Architecture diagram
+docs/             Architecture diagram + sample PDFs
 docker-compose.yml
 .env.example
 AI_USAGE.md
